@@ -1522,10 +1522,16 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
 
 #include <dtrace.h>
 
+#include <sys/types.h>
+#include <unistd.h>
+
 // TODO: Check Tracy code style and adopt
 namespace tracy {
 
 static dtrace_hdl_t* g_session = nullptr;
+
+// TODO: Where is the libproc.h used by libdtrace?
+constexpr auto PGRAB_RDONLY = 0x04;
 
 bool SysTraceStart(int64_t& samplingPeriod) {
     int error = 0;
@@ -1537,15 +1543,84 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         return false;
     }
     
+    // Capture ourselves as a target program for the probes below
+    if (!dtrace_proc_grab(g_session, getpid(), PGRAB_RDONLY)) {
+        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
+        return false;
+    }
+    
+    // TODO: This setting is the very definition of magic.. found it in a random twitter thread
+    if (dtrace_setopt(g_session, "nolibs", nullptr) == -1) {
+        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
+        return false;
+    }
+    
+    const char* kProgram = R"(
+        profile-997
+        /pid == $target/
+        {
+            printf("yo");
+    
+            trace(machtimestamp);
+            trace(tid);
+            ustack();
+        }
+    )";
+    
+    // Compile probe program
+    dtrace_prog_t* prog = dtrace_program_strcompile(g_session, kProgram, DTRACE_PROBESPEC_NAME, 0, 0, nullptr);
+    if (!prog) {
+        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
+        return false;
+    }
+    
+    dtrace_proginfo_t info;
+    
+    if (dtrace_program_exec(g_session, prog, &info) == -1) {
+        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
+        return false;
+    }
+    
+    if (dtrace_setopt(g_session, "bufsize", "512k") == -1) {
+        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
+        return false;
+    }
+    
+    if (auto err = dtrace_go(g_session)) {
+        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
+        return false;
+    }
+    
     return true;
 }
 
 void SysTraceStop() {
-    
+    // TODO
+}
+
+static int ProcessProbeRecord(const dtrace_probedata_t* probe, void* ctx) {
+    return DTRACE_CONSUME_THIS;
 }
 
 void SysTraceWorker(void* ptr) {
+    bool stop = false;
     
+    while(!stop) {
+        dtrace_sleep(g_session);
+        
+        auto status = dtrace_work(g_session, stdout, &ProcessProbeRecord, nullptr, nullptr);
+        switch (status) {
+            case DTRACE_WORKSTATUS_DONE:
+            case DTRACE_WORKSTATUS_OKAY: {
+                // Probe fully handled in consumer function
+            } break;
+         
+            case DTRACE_WORKSTATUS_ERROR: {
+                printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
+                stop = true;
+            } break;
+        }
+    }
 }
 
 void SysTraceGetExternalName(uint64_t thread, const char*& threadName, const char*& name) {
