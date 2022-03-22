@@ -1517,6 +1517,44 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
 
 }
 
+// TODO: Detect Darwin
+#  else
+
+#include <dtrace.h>
+
+// TODO: Check Tracy code style and adopt
+namespace tracy {
+
+static dtrace_hdl_t* g_session = nullptr;
+
+bool SysTraceStart(int64_t& samplingPeriod) {
+    int error = 0;
+
+    g_session = dtrace_open(DTRACE_VERSION, DTRACE_O_NOSYS, &error);
+    
+    if (error) {
+        printf("%s", dtrace_errmsg(g_session, error));
+        return false;
+    }
+    
+    return true;
+}
+
+void SysTraceStop() {
+    
+}
+
+void SysTraceWorker(void* ptr) {
+    
+}
+
+void SysTraceGetExternalName(uint64_t thread, const char*& threadName, const char*& name) {
+    threadName = CopyString("???", 3);
+    name = CopyStringFast("???", 3);
+}
+
+}
+
 #  endif
 
 #endif

@@ -8,6 +8,10 @@
 #  endif
 #endif
 
+// TODO: Detect Darwin
+#define TRACY_HAS_SYSTEM_TRACING
+#define TRACY_SAMPLING_HZ 10000
+
 #ifdef TRACY_HAS_SYSTEM_TRACING
 
 #include <stdint.h>

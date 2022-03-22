@@ -1683,7 +1683,7 @@ void Profiler::Worker()
 #endif
 
     int broadcastLen = 0;
-    auto& broadcastMsg = GetBroadcastMessage( procname, pnsz, broadcastLen, dataPort );
+    auto& broadcastMsg = GetBroadcastMessage( "mentlerd", pnsz, broadcastLen, dataPort );
     uint64_t lastBroadcast = 0;
 
     // Connections loop.
