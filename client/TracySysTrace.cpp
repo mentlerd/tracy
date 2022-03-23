@@ -1559,8 +1559,6 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         profile-997
         /pid == $target/
         {
-            printf("yo");
-    
             trace(machtimestamp);
             trace(tid);
             ustack();
@@ -1598,7 +1596,63 @@ void SysTraceStop() {
     // TODO
 }
 
-static int ProcessProbeRecord(const dtrace_probedata_t* probe, void* ctx) {
+static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
+    static dtrace_id_t profileProbeID = 0;
+    
+    const auto& pdesc = *pdata->dtpda_pdesc;
+    const auto& edesc = *pdata->dtpda_edesc;
+    
+    if (profileProbeID == 0 && strcmp(pdesc.dtpd_provider, "profile") == 0) {
+        profileProbeID = pdesc.dtpd_id;
+        
+        // Sanity check for entry structure
+        assert(edesc.dtepd_nrecs == 3);
+        
+        // trace(machtimestamp)
+        assert(edesc.dtepd_rec[0].dtrd_action == DTRACEACT_DIFEXPR);
+        assert(edesc.dtepd_rec[0].dtrd_size == sizeof(uint64_t));
+        
+        // trace(tid)
+        assert(edesc.dtepd_rec[1].dtrd_action == DTRACEACT_DIFEXPR);
+        assert(edesc.dtepd_rec[1].dtrd_size == sizeof(uint64_t));
+        
+        // ustack()
+        assert(edesc.dtepd_rec[2].dtrd_action == DTRACEACT_USTACK);
+    }
+    
+    if (profileProbeID == edesc.dtepd_probeid) {
+        const char* buffer = pdata->dtpda_data;
+        
+        auto mts = MemRead<uint64_t>(buffer + edesc.dtepd_rec[0].dtrd_offset);
+        auto tid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[1].dtrd_offset);
+        
+        // ustack()
+        auto ustackLen = DTRACE_USTACK_NFRAMES(edesc.dtepd_rec[2].dtrd_arg);
+        auto ustackRaw = reinterpret_cast<const uint64_t*>(buffer + edesc.dtepd_rec[2].dtrd_offset);
+        
+        auto pid = ustackRaw[0];
+        auto frames = &ustackRaw[1];
+        
+        size_t maxFrames = ustackLen - 1;
+        size_t numFrames = 0;
+        
+        for (; numFrames < maxFrames && frames[numFrames]; numFrames++) {
+            continue;
+        }
+        
+        // Submit report
+        auto trace = tracy_malloc_fast(numFrames * sizeof(uint64_t));
+        memcpy(trace, frames, numFrames * sizeof(uint64_t));
+        
+        TracyLfqPrepare( QueueType::CallstackSample );
+        MemWrite(&item->callstackSampleFat.time, mts);
+        MemWrite(&item->callstackSampleFat.thread, tid);
+        MemWrite(&item->callstackSampleFat.ptr, (uint64_t)trace);
+        TracyLfqCommit;
+
+        return DTRACE_CONSUME_NEXT;
+    }
+    
     return DTRACE_CONSUME_THIS;
 }
 
