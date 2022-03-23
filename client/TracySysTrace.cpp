@@ -1633,16 +1633,17 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
         auto pid = ustackRaw[0];
         auto frames = &ustackRaw[1];
         
-        size_t maxFrames = ustackLen - 1;
-        size_t numFrames = 0;
+        uint64_t maxFrames = ustackLen - 1;
+        uint64_t numFrames = 0;
         
         for (; numFrames < maxFrames && frames[numFrames]; numFrames++) {
             continue;
         }
         
         // Submit report
-        auto trace = tracy_malloc_fast(numFrames * sizeof(uint64_t));
-        memcpy(trace, frames, numFrames * sizeof(uint64_t));
+        auto trace = (uint64_t*) tracy_malloc_fast((1 + numFrames) * sizeof(uint64_t));
+        memcpy(trace + 0, &numFrames, sizeof(uint64_t));
+        memcpy(trace + 1, frames, numFrames * sizeof(uint64_t));
         
         TracyLfqPrepare( QueueType::CallstackSample );
         MemWrite(&item->callstackSampleFat.time, mts);
@@ -1657,6 +1658,10 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
 }
 
 void SysTraceWorker(void* ptr) {
+    ThreadExitHandler threadExitHandler;
+    SetThreadName("Tracy DTrace consumer");
+    InitRpmalloc();
+    
     bool stop = false;
     
     while(!stop) {
