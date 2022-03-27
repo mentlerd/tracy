@@ -154,7 +154,10 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
     const auto& hdr = record->EventHeader;
     switch( hdr.ProviderId.Data1 )
     {
-    case 0x3d6fa8d1:    // Thread Guid
+    // https://docs.microsoft.com/en-us/windows/win32/etw/thread
+    case 0x3d6fa8d1:
+    
+        // https://docs.microsoft.com/en-us/windows/win32/etw/cswitch
         if( hdr.EventDescriptor.Opcode == 36 )
         {
             const auto cswitch = (const CSwitch*)record->UserData;
@@ -168,6 +171,8 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
             MemWrite( &item->contextSwitch.state, cswitch->oldThreadState );
             TracyLfqCommit;
         }
+        
+        // https://docs.microsoft.com/en-us/windows/win32/etw/readythread
         else if( hdr.EventDescriptor.Opcode == 50 )
         {
             const auto rt = (const ReadyThread*)record->UserData;
@@ -177,6 +182,8 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
             MemWrite( &item->threadWakeup.thread, rt->threadId );
             TracyLfqCommit;
         }
+        
+        // https://docs.microsoft.com/en-us/windows/win32/etw/thread
         else if( hdr.EventDescriptor.Opcode == 1 || hdr.EventDescriptor.Opcode == 3 )
         {
             const auto tt = (const ThreadTrace*)record->UserData;
@@ -190,7 +197,11 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
             TracyLfqCommit;
         }
         break;
-    case 0xdef2fe46:    // StackWalk Guid
+    
+    // https://docs.microsoft.com/en-us/windows/win32/etw/stackwalk
+    case 0xdef2fe46:
+            
+        // https://docs.microsoft.com/en-us/windows/win32/etw/stackwalk-event
         if( hdr.EventDescriptor.Opcode == 32 )
         {
             const auto sw = (const StackWalkEvent*)record->UserData;
@@ -1555,9 +1566,21 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         return false;
     }
     
+    uint64_t id;
+    pthread_threadid_np( pthread_self(), &id );
+
+/*
+    pid$1:::entry,
+    pid$1:::return
+    /self->trace/
+    {}
+ 
+    Does not work, libdtrace tries to pause the program to install probes, and deadlocks :(
+ */
+    
     const char* kProgram = R"(
-        profile-997
-        /pid == $target/
+        profile-5000
+        /pid == $target && tid == $1/
         {
             trace(machtimestamp);
             trace(tid);
@@ -1565,8 +1588,19 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         }
     )";
     
+    std::array args {
+        std::string("tracy"),
+        std::to_string(id)
+    };
+    
+    std::array<char*, std::size(args)> argc;
+    
+    for (auto i = 0; i < argc.size(); i++) {
+        argc[i] = args[i].data();
+    }
+    
     // Compile probe program
-    dtrace_prog_t* prog = dtrace_program_strcompile(g_session, kProgram, DTRACE_PROBESPEC_NAME, 0, 0, nullptr);
+    dtrace_prog_t* prog = dtrace_program_strcompile(g_session, kProgram, DTRACE_PROBESPEC_NAME, 0, argc.size(), argc.data());
     if (!prog) {
         printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
         return false;
