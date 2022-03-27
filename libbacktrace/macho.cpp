@@ -319,18 +319,6 @@ static int macho_add (struct backtrace_state *, const char *, int, off_t,
 		      const unsigned char *, uintptr_t, int,
 		      backtrace_error_callback, void *, fileline *, int *);
 
-/* A dummy callback function used when we can't find any debug info.  */
-
-static int
-macho_nodebug (struct backtrace_state *state ATTRIBUTE_UNUSED,
-	       uintptr_t pc ATTRIBUTE_UNUSED,
-	       backtrace_full_callback callback ATTRIBUTE_UNUSED,
-	       backtrace_error_callback error_callback, void *data)
-{
-  error_callback (data, "no debug info in Mach-O executable", -1);
-  return 0;
-}
-
 /* A dummy callback function used when we can't find a symbol
    table.  */
 
@@ -341,6 +329,34 @@ macho_nosyms (struct backtrace_state *state ATTRIBUTE_UNUSED,
 	      backtrace_error_callback error_callback, void *data)
 {
   error_callback (data, "no symbol table in Mach-O executable", -1);
+}
+
+/* A callback function used when we can't find any debug info.  */
+
+static int
+macho_nodebug (struct backtrace_state *state ATTRIBUTE_UNUSED,
+           uintptr_t pc ATTRIBUTE_UNUSED,
+           backtrace_full_callback callback ATTRIBUTE_UNUSED,
+           backtrace_error_callback error_callback, void *data)
+{
+  if (state->syminfo_fn != NULL && state->syminfo_fn != macho_nosyms)
+    {
+      struct backtrace_call_full bdata;
+
+      /* Fetch symbol information so that we can least get the
+     function name.  */
+
+      bdata.full_callback = callback;
+      bdata.full_error_callback = error_callback;
+      bdata.full_data = data;
+      bdata.ret = 0;
+      state->syminfo_fn (state, pc, backtrace_syminfo_to_full_callback,
+             backtrace_syminfo_to_full_error_callback, &bdata);
+      return bdata.ret;
+    }
+
+  error_callback (data, "no debug info in Mach-O executable", -1);
+  return 0;
 }
 
 /* Add a single DWARF section to DWARF_SECTIONS, if we need the
