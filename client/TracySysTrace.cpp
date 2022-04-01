@@ -1547,7 +1547,7 @@ constexpr auto PGRAB_RDONLY = 0x04;
 bool SysTraceStart(int64_t& samplingPeriod) {
     int error = 0;
 
-    g_session = dtrace_open(DTRACE_VERSION, DTRACE_O_NOSYS, &error);
+    g_session = dtrace_open(DTRACE_VERSION, 0, &error);
     
     if (error) {
         printf("%s", dtrace_errmsg(g_session, error));
@@ -1556,12 +1556,6 @@ bool SysTraceStart(int64_t& samplingPeriod) {
     
     // Capture ourselves as a target program for the probes below
     if (!dtrace_proc_grab(g_session, getpid(), PGRAB_RDONLY)) {
-        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
-        return false;
-    }
-    
-    // TODO: This setting is the very definition of magic.. found it in a random twitter thread
-    if (dtrace_setopt(g_session, "nolibs", nullptr) == -1) {
         printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
         return false;
     }
