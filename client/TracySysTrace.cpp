@@ -1697,6 +1697,13 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
         // TODO: Verify probe layout after probe compilation
         assert(edesc.dtepd_nrecs == 5);
         
+        // S&#@.. Apparently context switches are collected on a per die basis, and reported
+        //  out of order. Tracy expects them to be in-order?
+        //
+        // https://wolf.nereid.pl/posts/linux-context-switch/#preventing-time-travel
+        // This is not actually documented, or asserted on either. Might be worth doing so?
+        // TODO: Raise issue
+        
         auto timestamp = MemRead<uint64_t>(buffer + edesc.dtepd_rec[0].dtrd_offset);
         auto old_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[1].dtrd_offset);
         auto new_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[2].dtrd_offset);

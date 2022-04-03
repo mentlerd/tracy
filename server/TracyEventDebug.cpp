@@ -149,6 +149,12 @@ void EventDebug( const QueueItem& ev )
         break;
     case QueueType::ContextSwitch:
         fprintf( f, "ev %i (ContextSwitch)\n", ev.hdr.idx );
+        fprintf( f, "\ttime      = %" PRIi64 "\n", ev.contextSwitch.time);
+        fprintf( f, "\toldThread = %" PRIu32 "\n", ev.contextSwitch.oldThread);
+        fprintf( f, "\tnewThread = %" PRIu32 "\n", ev.contextSwitch.newThread);
+        fprintf( f, "\tcpu       = %i \n", ev.contextSwitch.cpu);
+        fprintf( f, "\treason    = %i \n", ev.contextSwitch.reason);
+        fprintf( f, "\tstate     = %i \n", ev.contextSwitch.state);
         break;
     case QueueType::ThreadWakeup:
         fprintf( f, "ev %i (ThreadWakeup)\n", ev.hdr.idx );
