@@ -174,6 +174,16 @@ TRACY_API void SetThreadName( const char* name )
         }
     }
 #endif
+    
+    // TODO: Why does my machine not fit anything above?
+    {
+        char buf[16];
+        memcpy( buf, name, 15 );
+        buf[15] = '\0';
+    
+        pthread_setname_np(buf);
+    }
+    
 #ifdef TRACY_ENABLE
     {
         const auto sz = strlen( name );
