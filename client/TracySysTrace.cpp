@@ -1683,8 +1683,8 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
         memcpy(trace + 1, frames, numFrames * sizeof(uint64_t));
         
         TracyLfqPrepare(QueueType::CallstackSample);
-        MemWrite(&item->callstackSampleFat.time, mts);
-        MemWrite(&item->callstackSampleFat.thread, tid);
+        MemWrite(&item->callstackSampleFat.time, (int64_t) mts);
+        MemWrite(&item->callstackSampleFat.thread, (uint32_t) tid);
         MemWrite(&item->callstackSampleFat.ptr, (uint64_t)trace);
         TracyLfqCommit;
 
@@ -1705,12 +1705,12 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
         auto state = MemRead<uint32_t>(buffer + edesc.dtepd_rec[4].dtrd_offset);
     
         TracyLfqPrepare( QueueType::ContextSwitch );
-        MemWrite(&item->contextSwitch.time, timestamp);
-        MemWrite(&item->contextSwitch.oldThread, old_lwpid);
-        MemWrite(&item->contextSwitch.newThread, new_lwpid);
-        MemWrite(&item->contextSwitch.cpu, cpuid);
-        MemWrite(&item->contextSwitch.reason, 100); // TODO: Translate? Copied from linux impl
-        MemWrite(&item->contextSwitch.state, state); // TODO: Translate?
+        MemWrite(&item->contextSwitch.time, (int64_t) timestamp);
+        MemWrite(&item->contextSwitch.oldThread, (uint32_t) old_lwpid);
+        MemWrite(&item->contextSwitch.newThread, (uint32_t) new_lwpid);
+        MemWrite(&item->contextSwitch.cpu, (uint8_t) cpuid);
+        MemWrite(&item->contextSwitch.reason, (uint8_t) 100); // TODO: Translate? Copied from linux impl
+        MemWrite(&item->contextSwitch.state, (uint8_t) state); // TODO: Translate?
         TracyLfqCommit;
 
         return DTRACE_CONSUME_NEXT;
