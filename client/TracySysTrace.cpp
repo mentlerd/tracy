@@ -1580,6 +1580,15 @@ bool SysTraceStart(int64_t& samplingPeriod) {
             trace(tid);
             ustack();
         }
+    
+        sched:::off-cpu
+        {
+            trace(machtimestamp);
+            trace(curlwpsinfo->pr_lwpid);
+            trace(args[0]->pr_lwpid);
+            trace(curcpu->cpu_id);
+            trace(curlwpsinfo->pr_thstate);
+        }
     )";
     
     std::array args {
@@ -1673,10 +1682,35 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
         memcpy(trace + 0, &numFrames, sizeof(uint64_t));
         memcpy(trace + 1, frames, numFrames * sizeof(uint64_t));
         
-        TracyLfqPrepare( QueueType::CallstackSample );
+        TracyLfqPrepare(QueueType::CallstackSample);
         MemWrite(&item->callstackSampleFat.time, mts);
         MemWrite(&item->callstackSampleFat.thread, tid);
         MemWrite(&item->callstackSampleFat.ptr, (uint64_t)trace);
+        TracyLfqCommit;
+
+        return DTRACE_CONSUME_NEXT;
+    }
+    
+    if (strcmp(pdesc.dtpd_provider, "sched") == 0 && strcmp(pdesc.dtpd_name, "off-cpu") == 0) {
+        const char* buffer = pdata->dtpda_data;
+        
+        // TODO: Verify probe layout after probe compilation
+        assert(edesc.dtepd_nrecs == 5);
+        
+        auto timestamp = MemRead<uint64_t>(buffer + edesc.dtepd_rec[0].dtrd_offset);
+        auto old_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[1].dtrd_offset);
+        auto new_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[2].dtrd_offset);
+        
+        auto cpuid = MemRead<uint32_t>(buffer + edesc.dtepd_rec[3].dtrd_offset);
+        auto state = MemRead<uint32_t>(buffer + edesc.dtepd_rec[4].dtrd_offset);
+    
+        TracyLfqPrepare( QueueType::ContextSwitch );
+        MemWrite(&item->contextSwitch.time, timestamp);
+        MemWrite(&item->contextSwitch.oldThread, old_lwpid);
+        MemWrite(&item->contextSwitch.newThread, new_lwpid);
+        MemWrite(&item->contextSwitch.cpu, cpuid);
+        MemWrite(&item->contextSwitch.reason, 100); // TODO: Translate? Copied from linux impl
+        MemWrite(&item->contextSwitch.state, state); // TODO: Translate?
         TracyLfqCommit;
 
         return DTRACE_CONSUME_NEXT;
