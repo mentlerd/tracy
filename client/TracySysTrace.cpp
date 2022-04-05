@@ -1533,6 +1533,11 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
 
 #include <dtrace.h>
 
+#include <numeric>
+#include <deque>
+#include <vector>
+#include <thread>
+
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -1543,6 +1548,9 @@ static dtrace_hdl_t* g_session = nullptr;
 
 // TODO: Where is the libproc.h used by libdtrace?
 constexpr auto PGRAB_RDONLY = 0x04;
+
+// TODO: Optimize to get upstreamed?
+static std::vector<std::deque<QueueContextSwitch>> g_coreQueues;
 
 bool SysTraceStart(int64_t& samplingPeriod) {
     int error = 0;
@@ -1633,6 +1641,36 @@ void SysTraceStop() {
     // TODO
 }
 
+static void FlushContextSwitches() {
+    while (true) {
+        int64_t minTime = std::numeric_limits<int64_t>::max();
+        size_t minId = -1;
+        
+        for (auto i = 0; i < g_coreQueues.size(); i++) {
+            const auto& queue = g_coreQueues[i];
+            
+            if (queue.empty()) {
+                return;
+            }
+            
+            auto time = queue.front().time;
+            
+            if (minTime > time) {
+                minTime = time;
+                minId = i;
+            }
+        }
+        
+        auto& queue = g_coreQueues[minId];
+        
+        TracyLfqPrepare(QueueType::ContextSwitch);
+        MemWrite(&item->contextSwitch, queue.front());
+        TracyLfqCommit;
+        
+        queue.pop_front();
+    }
+}
+
 static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
     static dtrace_id_t profileProbeID = 0;
     
@@ -1711,14 +1749,19 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
         auto cpuid = MemRead<uint32_t>(buffer + edesc.dtepd_rec[3].dtrd_offset);
         auto state = MemRead<uint32_t>(buffer + edesc.dtepd_rec[4].dtrd_offset);
     
-        TracyLfqPrepare( QueueType::ContextSwitch );
-        MemWrite(&item->contextSwitch.time, (int64_t) timestamp);
-        MemWrite(&item->contextSwitch.oldThread, (uint32_t) old_lwpid);
-        MemWrite(&item->contextSwitch.newThread, (uint32_t) new_lwpid);
-        MemWrite(&item->contextSwitch.cpu, (uint8_t) cpuid);
-        MemWrite(&item->contextSwitch.reason, (uint8_t) 100); // TODO: Translate? Copied from linux impl
-        MemWrite(&item->contextSwitch.state, (uint8_t) state); // TODO: Translate?
-        TracyLfqCommit;
+        QueueContextSwitch entry;
+        
+        entry.time = (int64_t) timestamp;
+        entry.oldThread = (uint32_t) old_lwpid; // TODO: Are these safe to cast? Is macOS thread ID actually 32 bit?
+        entry.newThread = (uint32_t) new_lwpid;
+        entry.cpu = (uint8_t) cpuid;
+        entry.reason = (uint8_t) 100; // TODO: Translate? Copied from linux impl
+        entry.state = (uint8_t) state; // TODO: Translate?
+        
+        g_coreQueues.at(cpuid).push_back(entry);
+        
+        // TODO: Probably should do this while sleeping
+        FlushContextSwitches();
 
         return DTRACE_CONSUME_NEXT;
     }
@@ -1732,6 +1775,10 @@ void SysTraceWorker(void* ptr) {
     InitRpmalloc();
     
     bool stop = false;
+    
+    for (auto i = 0; i < std::thread::hardware_concurrency(); i++) {
+        g_coreQueues.emplace_back();
+    }
     
     while(!stop) {
         dtrace_sleep(g_session);
