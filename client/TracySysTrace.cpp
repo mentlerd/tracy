@@ -1562,6 +1562,9 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         return false;
     }
     
+    // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/dev/dtrace/scripts/darwin.d
+    // https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/thread.h
+    // https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/sched_prim.c
     const char* kProgram = R"(
         sched:::off-cpu
         {
@@ -1651,6 +1654,8 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
     entry.oldThread = (uint32_t) old_lwpid; // TODO: Are these safe to cast? Is macOS thread ID actually 32 bit?
     entry.newThread = (uint32_t) new_lwpid;
     entry.cpu = (uint8_t) cpuid;
+    
+    // https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/thread.h
     entry.reason = (uint8_t) 100; // TODO: Translate? Copied from linux impl
     entry.state = (uint8_t) state; // TODO: Translate?
     
