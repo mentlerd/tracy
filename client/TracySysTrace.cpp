@@ -1562,33 +1562,7 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         return false;
     }
     
-    // Capture ourselves as a target program for the probes below
-    if (!dtrace_proc_grab(g_session, getpid(), PGRAB_RDONLY)) {
-        printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
-        return false;
-    }
-    
-    uint64_t id;
-    pthread_threadid_np( pthread_self(), &id );
-
-/*
-    pid$1:::entry,
-    pid$1:::return
-    /self->trace/
-    {}
- 
-    Does not work, libdtrace tries to pause the program to install probes, and deadlocks :(
- */
-    
     const char* kProgram = R"(
-        profile-5000
-        /pid == $target && tid == $1/
-        {
-            trace(machtimestamp);
-            trace(tid);
-            ustack();
-        }
-    
         sched:::off-cpu
         {
             trace(machtimestamp);
@@ -1599,19 +1573,8 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         }
     )";
     
-    std::array args {
-        std::string("tracy"),
-        std::to_string(id)
-    };
-    
-    std::array<char*, std::size(args)> argc;
-    
-    for (auto i = 0; i < argc.size(); i++) {
-        argc[i] = args[i].data();
-    }
-    
     // Compile probe program
-    dtrace_prog_t* prog = dtrace_program_strcompile(g_session, kProgram, DTRACE_PROBESPEC_NAME, 0, argc.size(), argc.data());
+    dtrace_prog_t* prog = dtrace_program_strcompile(g_session, kProgram, DTRACE_PROBESPEC_NAME, 0, 0, nullptr);
     if (!prog) {
         printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
         return false;
@@ -1624,7 +1587,7 @@ bool SysTraceStart(int64_t& samplingPeriod) {
         return false;
     }
     
-    if (dtrace_setopt(g_session, "bufsize", "512k") == -1) {
+    if (dtrace_setopt(g_session, "bufsize", "1m") == -1) {
         printf("%s", dtrace_errmsg(g_session, dtrace_errno(g_session)));
         return false;
     }
@@ -1672,101 +1635,28 @@ static void FlushContextSwitches() {
 }
 
 static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
-    static dtrace_id_t profileProbeID = 0;
-    
-    const auto& pdesc = *pdata->dtpda_pdesc;
     const auto& edesc = *pdata->dtpda_edesc;
+    const char* buffer = pdata->dtpda_data;
     
-    if (profileProbeID == 0 && strcmp(pdesc.dtpd_provider, "profile") == 0) {
-        profileProbeID = pdesc.dtpd_id;
-        
-        // Sanity check for entry structure
-        assert(edesc.dtepd_nrecs == 3);
-        
-        // trace(machtimestamp)
-        assert(edesc.dtepd_rec[0].dtrd_action == DTRACEACT_DIFEXPR);
-        assert(edesc.dtepd_rec[0].dtrd_size == sizeof(uint64_t));
-        
-        // trace(tid)
-        assert(edesc.dtepd_rec[1].dtrd_action == DTRACEACT_DIFEXPR);
-        assert(edesc.dtepd_rec[1].dtrd_size == sizeof(uint64_t));
-        
-        // ustack()
-        assert(edesc.dtepd_rec[2].dtrd_action == DTRACEACT_USTACK);
-    }
+    auto timestamp = MemRead<uint64_t>(buffer + edesc.dtepd_rec[0].dtrd_offset);
+    auto old_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[1].dtrd_offset);
+    auto new_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[2].dtrd_offset);
     
-    if (profileProbeID == edesc.dtepd_probeid) {
-        const char* buffer = pdata->dtpda_data;
-        
-        auto mts = MemRead<uint64_t>(buffer + edesc.dtepd_rec[0].dtrd_offset);
-        auto tid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[1].dtrd_offset);
-        
-        // ustack()
-        auto ustackLen = DTRACE_USTACK_NFRAMES(edesc.dtepd_rec[2].dtrd_arg);
-        auto ustackRaw = reinterpret_cast<const uint64_t*>(buffer + edesc.dtepd_rec[2].dtrd_offset);
-        
-        auto pid = ustackRaw[0];
-        auto frames = &ustackRaw[1];
-        
-        uint64_t maxFrames = ustackLen - 1;
-        uint64_t numFrames = 0;
-        
-        for (; numFrames < maxFrames && frames[numFrames]; numFrames++) {
-            continue;
-        }
-        
-        // Submit report
-        auto trace = (uint64_t*) tracy_malloc_fast((1 + numFrames) * sizeof(uint64_t));
-        memcpy(trace + 0, &numFrames, sizeof(uint64_t));
-        memcpy(trace + 1, frames, numFrames * sizeof(uint64_t));
-        
-        TracyLfqPrepare(QueueType::CallstackSample);
-        MemWrite(&item->callstackSampleFat.time, (int64_t) mts);
-        MemWrite(&item->callstackSampleFat.thread, (uint32_t) tid);
-        MemWrite(&item->callstackSampleFat.ptr, (uint64_t)trace);
-        TracyLfqCommit;
+    auto cpuid = MemRead<uint32_t>(buffer + edesc.dtepd_rec[3].dtrd_offset);
+    auto state = MemRead<uint32_t>(buffer + edesc.dtepd_rec[4].dtrd_offset);
 
-        return DTRACE_CONSUME_NEXT;
-    }
+    QueueContextSwitch entry;
     
-    if (strcmp(pdesc.dtpd_provider, "sched") == 0 && strcmp(pdesc.dtpd_name, "off-cpu") == 0) {
-        const char* buffer = pdata->dtpda_data;
-        
-        // TODO: Verify probe layout after probe compilation
-        assert(edesc.dtepd_nrecs == 5);
-        
-        // S&#@.. Apparently context switches are collected on a per die basis, and reported
-        //  out of order. Tracy expects them to be in-order?
-        //
-        // https://wolf.nereid.pl/posts/linux-context-switch/#preventing-time-travel
-        // This is not actually documented, or asserted on either. Might be worth doing so?
-        // TODO: Raise issue
-        
-        auto timestamp = MemRead<uint64_t>(buffer + edesc.dtepd_rec[0].dtrd_offset);
-        auto old_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[1].dtrd_offset);
-        auto new_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[2].dtrd_offset);
-        
-        auto cpuid = MemRead<uint32_t>(buffer + edesc.dtepd_rec[3].dtrd_offset);
-        auto state = MemRead<uint32_t>(buffer + edesc.dtepd_rec[4].dtrd_offset);
+    entry.time = (int64_t) timestamp;
+    entry.oldThread = (uint32_t) old_lwpid; // TODO: Are these safe to cast? Is macOS thread ID actually 32 bit?
+    entry.newThread = (uint32_t) new_lwpid;
+    entry.cpu = (uint8_t) cpuid;
+    entry.reason = (uint8_t) 100; // TODO: Translate? Copied from linux impl
+    entry.state = (uint8_t) state; // TODO: Translate?
     
-        QueueContextSwitch entry;
-        
-        entry.time = (int64_t) timestamp;
-        entry.oldThread = (uint32_t) old_lwpid; // TODO: Are these safe to cast? Is macOS thread ID actually 32 bit?
-        entry.newThread = (uint32_t) new_lwpid;
-        entry.cpu = (uint8_t) cpuid;
-        entry.reason = (uint8_t) 100; // TODO: Translate? Copied from linux impl
-        entry.state = (uint8_t) state; // TODO: Translate?
-        
-        g_coreQueues.at(cpuid).push_back(entry);
-        
-        // TODO: Probably should do this while sleeping
-        FlushContextSwitches();
-
-        return DTRACE_CONSUME_NEXT;
-    }
+    g_coreQueues.at(cpuid).push_back(entry);
     
-    return DTRACE_CONSUME_THIS;
+    return DTRACE_CONSUME_NEXT;
 }
 
 void SysTraceWorker(void* ptr) {
@@ -1776,9 +1666,7 @@ void SysTraceWorker(void* ptr) {
     
     bool stop = false;
     
-    for (auto i = 0; i < std::thread::hardware_concurrency(); i++) {
-        g_coreQueues.emplace_back();
-    }
+    g_coreQueues.resize(std::thread::hardware_concurrency());
     
     while(!stop) {
         dtrace_sleep(g_session);
@@ -1795,6 +1683,8 @@ void SysTraceWorker(void* ptr) {
                 stop = true;
             } break;
         }
+        
+        FlushContextSwitches();
     }
 }
 
