@@ -1537,8 +1537,12 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
 #include <deque>
 #include <vector>
 #include <thread>
+#include <unordered_map>
+
+#import <mach/mach.h>
 
 #include <sys/types.h>
+#include <libproc.h>
 #include <unistd.h>
 
 // TODO: Check Tracy code style and adopt
@@ -1573,6 +1577,11 @@ bool SysTraceStart(int64_t& samplingPeriod) {
             trace(args[0]->pr_lwpid);
             trace(curcpu->cpu_id);
             trace(curlwpsinfo->pr_thstate);
+    
+            trace(curpsinfo->pr_pid);
+    
+            // NB: Bug in xnu-8020.101.4: args[1] == curpsinfo >:(
+            // trace(args[1]->pr_pid);
         }
     )";
     
@@ -1637,17 +1646,26 @@ static void FlushContextSwitches() {
     }
 }
 
+struct ThreadInfo {
+    uint32_t pid;
+};
+
+static std::unordered_map<uint64_t, ThreadInfo> g_threadInfo;
+
 static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
     const auto& edesc = *pdata->dtpda_edesc;
     const char* buffer = pdata->dtpda_data;
-    
+
     auto timestamp = MemRead<uint64_t>(buffer + edesc.dtepd_rec[0].dtrd_offset);
     auto old_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[1].dtrd_offset);
     auto new_lwpid = MemRead<uint64_t>(buffer + edesc.dtepd_rec[2].dtrd_offset);
     
     auto cpuid = MemRead<uint32_t>(buffer + edesc.dtepd_rec[3].dtrd_offset);
     auto state = MemRead<uint32_t>(buffer + edesc.dtepd_rec[4].dtrd_offset);
-
+    
+    auto old_pid = MemRead<uint32_t>(buffer + edesc.dtepd_rec[5].dtrd_offset);
+    
+    // Enqueue context switch
     QueueContextSwitch entry;
     
     entry.time = (int64_t) timestamp;
@@ -1660,6 +1678,16 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
     entry.state = (uint8_t) state; // TODO: Translate?
     
     g_coreQueues.at(cpuid).push_back(entry);
+    
+    // Stash lwpid - pid association for later
+    auto [_, placed] = g_threadInfo.try_emplace(old_lwpid, ThreadInfo{old_pid});
+    
+    if (placed) {
+        TracyLfqPrepare( QueueType::TidToPid );
+        MemWrite<uint64_t>(&item->tidToPid.tid, old_lwpid);
+        MemWrite<uint64_t>(&item->tidToPid.pid, old_pid);
+        TracyLfqCommit;
+    }
     
     return DTRACE_CONSUME_NEXT;
 }
@@ -1693,9 +1721,55 @@ void SysTraceWorker(void* ptr) {
     }
 }
 
-void SysTraceGetExternalName(uint64_t thread, const char*& threadName, const char*& name) {
-    threadName = CopyString("???", 3);
-    name = CopyStringFast("???", 3);
+void SysTraceGetExternalName(uint64_t thread, const char*& threadName, const char*& processName) {
+    threadName = nullptr;
+    processName = nullptr;
+    
+    auto it = g_threadInfo.find(thread);
+    if (it != g_threadInfo.end()) {
+        const auto& threadInfo = it->second;
+        
+        char buffer[128];
+        auto len = proc_name(threadInfo.pid, buffer, std::size(buffer));
+        if (len > 0) {
+            processName = CopyStringFast(buffer, len);
+        }
+        
+        task_t taskPort;
+        if (task_for_pid(mach_task_self(), threadInfo.pid, &taskPort) == KERN_SUCCESS) {
+            thread_act_array_t threadPorts;
+            mach_msg_type_number_t count;
+            
+            if (task_threads(taskPort, &threadPorts, &count) == KERN_SUCCESS) {
+                for (auto i = 0; i < count; i++) {
+                    thread_info_data_t buffer;
+                    mach_msg_type_number_t size = THREAD_EXTENDED_INFO_COUNT;
+                    
+                    if (thread_info(threadPorts[i], THREAD_EXTENDED_INFO, (thread_info_t) buffer, &size) == KERN_SUCCESS) {
+                        auto info = reinterpret_cast<thread_extended_info_t>(buffer);
+                        auto name = info->pth_name;
+                        
+                        if (auto len = strlen(name)) {
+                            threadName = CopyString(name, len);
+                        }
+                    }
+                    
+                    mach_port_deallocate(mach_task_self(), threadPorts[i]);
+                }
+                
+                vm_deallocate(mach_task_self(), (vm_address_t) threadPorts, sizeof(thread_act_array_t) * count);
+            }
+            
+            mach_port_deallocate(mach_task_self(), taskPort);
+        }
+    }
+    
+    if (processName == nullptr) {
+        processName = CopyStringFast("???", 3);
+    }
+    if (threadName == nullptr) {
+        threadName = CopyString("???", 3);
+    }
 }
 
 }
