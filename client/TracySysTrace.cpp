@@ -1548,13 +1548,21 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
 // TODO: Check Tracy code style and adopt
 namespace tracy {
 
+enum class ThreadTrackingMode {
+    All, NoKernel, OnlyOwn
+};
+static constexpr auto kThreadTrackingMode = ThreadTrackingMode::OnlyOwn;
+
 static dtrace_hdl_t* g_session = nullptr;
 
-// TODO: Where is the libproc.h used by libdtrace?
-constexpr auto PGRAB_RDONLY = 0x04;
-
 // TODO: Optimize to get upstreamed?
-static std::vector<std::deque<QueueContextSwitch>> g_coreQueues;
+struct PerCPUData {
+    std::deque<QueueContextSwitch> queue;
+
+    bool lastSwitchedToTrackedThread = false;
+};
+
+static std::vector<PerCPUData> g_cpuData;
 
 bool SysTraceStart(int64_t& samplingPeriod) {
     int error = 0;
@@ -1621,8 +1629,8 @@ static void FlushContextSwitches() {
         int64_t minTime = std::numeric_limits<int64_t>::max();
         size_t minId = -1;
         
-        for (auto i = 0; i < g_coreQueues.size(); i++) {
-            const auto& queue = g_coreQueues[i];
+        for (auto i = 0; i < g_cpuData.size(); i++) {
+            const auto& queue = g_cpuData[i].queue;
             
             if (queue.empty()) {
                 return;
@@ -1636,7 +1644,7 @@ static void FlushContextSwitches() {
             }
         }
         
-        auto& queue = g_coreQueues[minId];
+        auto& queue = g_cpuData[minId].queue;
         
         TracyLfqPrepare(QueueType::ContextSwitch);
         MemWrite(&item->contextSwitch, queue.front());
@@ -1677,9 +1685,7 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
     entry.reason = (uint8_t) 100; // TODO: Translate? Copied from linux impl
     entry.state = (uint8_t) state; // TODO: Translate?
     
-    g_coreQueues.at(cpuid).push_back(entry);
-    
-    // Stash lwpid - pid association for later
+    // Register lwpid - pid association
     auto [_, placed] = g_threadInfo.try_emplace(old_lwpid, ThreadInfo{old_pid});
     
     if (placed) {
@@ -1688,6 +1694,43 @@ static int ProcessProbeRecord(const dtrace_probedata_t* pdata, void* ctx) {
         MemWrite<uint64_t>(&item->tidToPid.pid, old_pid);
         TracyLfqCommit;
     }
+    
+    // Store context switch
+    auto& cpuData = g_cpuData.at(cpuid);
+    
+    bool isTrackedThread = false;
+    
+    auto it = g_threadInfo.find(new_lwpid);
+    if (it != g_threadInfo.end()) {
+        auto pid = it->second.pid;
+
+        switch (kThreadTrackingMode) {
+            case ThreadTrackingMode::All: {
+                isTrackedThread = true;
+            } break;
+                
+            case ThreadTrackingMode::NoKernel: {
+                isTrackedThread = (pid != 0);
+            } break;
+                
+            case ThreadTrackingMode::OnlyOwn: {
+                isTrackedThread = (pid == getpid());
+            } break;
+        }
+    }
+        
+    if (isTrackedThread) {
+        if (!cpuData.lastSwitchedToTrackedThread) {
+            entry.oldThread = 0;
+        }
+        
+        cpuData.queue.push_back(entry);
+    } else if (cpuData.lastSwitchedToTrackedThread) {
+        entry.newThread = 0;
+        cpuData.queue.push_back(entry);
+    }
+    
+    cpuData.lastSwitchedToTrackedThread = isTrackedThread;
     
     return DTRACE_CONSUME_NEXT;
 }
@@ -1699,7 +1742,7 @@ void SysTraceWorker(void* ptr) {
     
     bool stop = false;
     
-    g_coreQueues.resize(std::thread::hardware_concurrency());
+    g_cpuData.resize(std::thread::hardware_concurrency());
     
     while(!stop) {
         dtrace_sleep(g_session);
